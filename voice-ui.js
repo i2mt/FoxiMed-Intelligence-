@@ -137,7 +137,7 @@
         return (tmp.textContent || tmp.innerText || '').replace(/\s+/g, ' ').trim();
     }
     function isVoiceOutputOn() {
-        return !!(window.AppState && window.AppState.settings && window.AppState.settings.voiceOutput);
+        return typeof AppState !== 'undefined' && !!(AppState && AppState.settings && AppState.settings.voiceOutput);
     }
     function speak(message) {
         if (!window.speechSynthesis || !isVoiceOutputOn()) return;
@@ -161,12 +161,12 @@
         els.ttsToggle.setAttribute('aria-label', on ? 'پاسخ صوتی روشن است' : 'پاسخ صوتی خاموش است');
     }
     function toggleVoiceOutput() {
-        if (!window.AppState || !window.AppState.settings) return;
-        window.AppState.settings.voiceOutput = !window.AppState.settings.voiceOutput;
-        if (typeof window.saveSettings === 'function') window.saveSettings();
+        if (typeof AppState === 'undefined' || !AppState.settings) return;
+        AppState.settings.voiceOutput = !AppState.settings.voiceOutput;
+        if (typeof saveSettings === 'function') saveSettings();
         updateTtsToggleIcon();
         if (typeof haptic === 'function') haptic(15);
-        showResult(window.AppState.settings.voiceOutput ? 'پاسخ صوتی فعال شد 🔊' : 'پاسخ صوتی غیرفعال شد', 'info');
+        showResult(AppState.settings.voiceOutput ? 'پاسخ صوتی فعال شد 🔊' : 'پاسخ صوتی غیرفعال شد', 'info');
     }
 
     // ============================================
@@ -292,7 +292,7 @@
         });
         window.VoiceEngine.on('model-loading', function () {
             setOrbState('loading-model');
-            setStatus('آماده‌سازی موتور آفلاین... (فقط بار اول، حدود ۶۰ مگابایت)', 'processing');
+            setStatus('آماده‌سازی موتور آفلاین... (فقط بار اول، حدود ۵۳ مگابایت)', 'processing');
         });
         window.VoiceEngine.on('model-ready', function () {
             if (els.orbContainer && els.orbContainer.classList.contains('is-loading-model')) {

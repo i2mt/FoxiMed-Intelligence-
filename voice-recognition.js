@@ -29,16 +29,26 @@
 
    --- SETUP REQUIRED FOR THE VOSK (iOS) BACKEND ---
    Set VOSK_MODEL_URL below to your own hosted `.tar.gz` Persian Vosk
-   model (vosk-model-small-fa-0.5, ~60MB). Until that's set, iOS falls
-   back to the native API + the existing "open in Safari / type instead"
-   guidance, so nothing breaks if you deploy before the model is ready.
+   model. Until that's set, iOS falls back to the native API + the
+   existing "open in Safari / type instead" guidance, so nothing breaks
+   if you deploy before the model is ready.
+
+   WHICH MODEL: use vosk-model-small-fa-0.42 (53MB), not -0.5 (60MB).
+   Despite the lower version number, alphacephei's own published word
+   error rates show 0.42 is the noticeably better-trained generation —
+   roughly 25-45% fewer word errors than 0.5 on their own benchmarks
+   (CV17: 23.4 vs 31.2 / Fleurs: 14.0 vs 26.2) — while also being a
+   smaller download. There's no real reason to use 0.5 instead.
+   (A non-"small" vosk-model-fa-0.42 also exists with even better
+   accuracy, but at 1.6GB it's impractical for a web app — skip it.)
+   Get it from https://alphacephei.com/vosk/models.
 
    Gotchas worth knowing (verified against the actual vosk-browser v0.0.8
    source, not just its README, since the README example is slightly
    out of date):
      - The model file MUST be `.tar.gz`, not the `.zip` alphacephei.com
        distributes. Unzip it, rename the folder to exactly `model`, then:
-           tar -czf vosk-model-small-fa-0.5.tar.gz model
+           tar -czf vosk-model-small-fa-0.42.tar.gz model
        (the library's virtual filesystem expects the top-level folder to
        be literally named "model" — keeping the original folder name is
        a common silent-failure cause).
@@ -48,7 +58,7 @@
      - Host the file on the SAME origin as the rest of FoxiMed (e.g. next
        to index.html) so there's no CORS step to configure at all.
      - Set a long Cache-Control (e.g. max-age=31536000, immutable) on that
-       file at your host so repeat visits don't re-download ~60MB.
+       file at your host so repeat visits don't re-download ~53MB.
      - This part of the rebuild could not be end-to-end tested here (no
        iOS device, no microphone, no real network fetch of the model in
        this sandbox) — the integration matches the verified library
@@ -354,6 +364,15 @@
             if (startWatchdog) { clearTimeout(startWatchdog); startWatchdog = null; }
             armSilenceWatchdog();
             emit('start');
+            // Microphone level metering for the UI — requested only now,
+            // after the recognition engine itself has confirmed it has the
+            // mic. Some older Android/WebView combinations appear to
+            // mis-arbitrate two near-simultaneous mic permission requests
+            // (one implicit inside SpeechRecognition, one explicit from a
+            // separate getUserMedia call), reporting the recognition's own
+            // permission as denied even though the user never saw a second
+            // prompt. Waiting for onstart removes that race entirely.
+            attachAudioMeter();
         };
 
         recognition.onresult = function (event) {
@@ -413,11 +432,6 @@
                 stopWebSpeech();
             }
         }, 5000);
-
-        // Microphone level metering for the UI — fetched independently and
-        // *after* recognition.start() so it never delays/blocks the call
-        // above.
-        attachAudioMeter();
     }
 
     function stopWebSpeech() {
@@ -484,7 +498,7 @@
         // Defensive: the library's own createModel() can in principle hang
         // with no event at all on a bad network/CORS condition (not
         // something verifiable without a live device), so cap the wait
-        // rather than leaving the UI stuck on "preparing" forever. 60MB on
+        // rather than leaving the UI stuck on "preparing" forever. 53MB on
         // a slow connection legitimately needs a generous allowance.
         const timeoutChain = new Promise(function (_, reject) {
             setTimeout(function () { reject(classifyError('vosk-model-failed')); }, 45000);
@@ -516,12 +530,29 @@
         ensureVoskModel().then(function (model) {
             if (voskCancelRequested) { voskLoading = false; return; }
             let recognizer;
+            // Bias the decoder toward FoxiMed's actual vocabulary (drug
+            // names, command words, numbers, units) when available — it
+            // can still freely combine these in whatever order someone
+            // speaks them, it's not limited to exact pre-written phrases.
+            // Experimental: not every Vosk model build supports a runtime
+            // grammar, so this falls back to plain recognition if it does.
+            let grammar = null;
             try {
-                recognizer = new model.KaldiRecognizer(16000);
+                if (window.VoiceCommands && typeof window.VoiceCommands.getGrammar === 'function') {
+                    grammar = window.VoiceCommands.getGrammar();
+                }
+            } catch (e) { grammar = null; }
+
+            try {
+                recognizer = grammar ? new model.KaldiRecognizer(16000, grammar) : new model.KaldiRecognizer(16000);
             } catch (e) {
-                voskLoading = false;
-                emit('error', classifyError('vosk-runtime'));
-                return;
+                try {
+                    recognizer = new model.KaldiRecognizer(16000); // retry without grammar
+                } catch (e2) {
+                    voskLoading = false;
+                    emit('error', classifyError('vosk-runtime'));
+                    return;
+                }
             }
             voskRecognizer = recognizer;
 
@@ -546,7 +577,7 @@
 
             navigator.mediaDevices.getUserMedia({
                 video: false,
-                audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1, sampleRate: 16000 }
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 16000 }
             }).then(function (stream) {
                 voskLoading = false;
                 if (voskCancelRequested || voskRecognizer !== recognizer) {

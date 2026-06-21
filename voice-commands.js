@@ -14,6 +14,7 @@
    which point every script has already loaded).
 
    Public API: window.VoiceCommands.process(text)
+               window.VoiceCommands.getGrammar() — see VOSK GRAMMAR below
 
    © Mohammad Mahdi Taghavi — FoxiMed
    ============================================ */
@@ -349,8 +350,22 @@
         'شش': '6', 'هفت': '7', 'هشت': '8', 'نه': '9', 'ده': '10',
         'یازده': '11', 'دوازده': '12', 'سیزده': '13', 'چهارده': '14', 'پانزده': '15',
         'شانزده': '16', 'هفده': '17', 'هجده': '18', 'نوزده': '19', 'بیست': '20',
-        'سی': '30', 'چهل': '40', 'پنجاه': '50', 'شصت': '60', 'هفتاد': '70', 'هشتاد': '80', 'نود': '90', 'صد': '100'
+        'سی': '30', 'چهل': '40', 'پنجاه': '50', 'شصت': '60', 'هفتاد': '70', 'هشتاد': '80', 'نود': '90', 'صد': '100',
+        'دویست': '200', 'سیصد': '300', 'چهارصد': '400', 'پانصد': '500',
+        'ششصد': '600', 'هفتصد': '700', 'هشتصد': '800', 'نهصد': '900', 'هزار': '1000'
     };
+    // Longest words first — critical so a compound word like "نهصد" (900)
+    // is matched whole before its own prefix "نه" (9) ever gets a chance
+    // to (previously: extractDoseFromText's substring-based fallback could
+    // match "نه" *inside* "نهصد" and silently return 9 instead of 900).
+    const PERSIAN_NUMBER_WORD_KEYS = Object.keys(PERSIAN_NUMBER_WORDS).sort(function (a, b) { return b.length - a.length; });
+    // Matches a number word only when it's a standalone token (preceded and
+    // followed by whitespace/string edges) — `\b` does NOT work for this
+    // since it's defined in terms of ASCII word characters and never fires
+    // around Persian script at all.
+    function matchPersianNumberWord(text, word) {
+        return new RegExp('(^|\\s)' + word + '(?=$|\\s)').test(text);
+    }
 
     const PERSIAN_UNIT_WORDS = {
         'میلی گرم': 'mg', 'میلی‌گرم': 'mg',
@@ -525,6 +540,62 @@
     }
 
     // ============================================
+    // VOSK GRAMMAR (experimental)
+    // Vosk's small/dynamic models support an optional vocabulary list that
+    // biases the decoder toward known words instead of the full language —
+    // it can still freely recombine these words in any order/sequence a
+    // user actually speaks them in, it's not limited to exact pre-written
+    // phrases. Built once and cached; voice-recognition.js asks for this
+    // only for the Vosk (iOS) backend, with a "[unk]" catch-all included
+    // so genuinely unlisted speech doesn't get forced into the wrong known
+    // word — and falls back to unconstrained recognition entirely if the
+    // specific model build doesn't support a grammar at all.
+    // ============================================
+    let cachedGrammar = null;
+    const EXTRA_GRAMMAR_WORDS = [
+        'بمی', 'بی ام ای', 'بی', 'ام', 'ای', 'جی سی اس', 'آر اس اس',
+        'وزن', 'قد', 'سن', 'مرد', 'زن', 'ساعت', 'دقیقه', 'لیتر', 'درصد',
+        'mg', 'mcg', 'g', 'ml', 'meq', 'units', 'kg', 'bar', 'psi',
+        'میلی گرم', 'میلی‌گرم', 'میکروگرم', 'میکرو گرم', 'گرم', 'واحد',
+        'سی سی', 'سی‌سی', 'و', 'به', 'در', 'تا', 'از', 'با', 'بدون'
+    ];
+
+    function buildVoiceGrammar() {
+        if (cachedGrammar) return cachedGrammar;
+        const words = new Set();
+
+        function addPhrase(phrase) {
+            if (!phrase) return;
+            String(phrase).trim().split(/\s+/).forEach(function (w) {
+                if (w) words.add(w);
+            });
+        }
+
+        // Drug names — every word of every name/alias, plus the full name
+        // itself for the common single-word cases.
+        for (const id in drugDatabase) {
+            const d = drugDatabase[id];
+            addPhrase(d.persianName);
+            addPhrase(d.englishName);
+            (d.alternativeNames || []).forEach(addPhrase);
+        }
+
+        // Every trigger phrase across every command, split into words.
+        for (const cmd in COMMAND_KEYWORDS) {
+            COMMAND_KEYWORDS[cmd].triggers.forEach(addPhrase);
+        }
+
+        // Numbers, units, small connective words.
+        Object.keys(PERSIAN_NUMBER_WORDS).forEach(addPhrase);
+        Object.keys(PERSIAN_UNIT_WORDS).forEach(addPhrase);
+        EXTRA_GRAMMAR_WORDS.forEach(addPhrase);
+
+        words.add('[unk]');
+        cachedGrammar = JSON.stringify(Array.from(words));
+        return cachedGrammar;
+    }
+
+    // ============================================
     // MAIN ENTRY POINT
     // ============================================
     function process(text) {
@@ -570,8 +641,12 @@
         if (trySmallTalk(normalized, lower)) return;
 
         let textWithDigits = normalized;
-        for (const word in PERSIAN_NUMBER_WORDS) {
-            textWithDigits = textWithDigits.replace(new RegExp('\\b' + word + '\\b', 'g'), PERSIAN_NUMBER_WORDS[word]);
+        for (let i = 0; i < PERSIAN_NUMBER_WORD_KEYS.length; i++) {
+            const word = PERSIAN_NUMBER_WORD_KEYS[i];
+            textWithDigits = textWithDigits.replace(
+                new RegExp('(^|\\s)' + word + '(?=$|\\s)', 'g'),
+                function (match, prefix) { return prefix + PERSIAN_NUMBER_WORDS[word]; }
+            );
         }
         for (const persian in PERSIAN_UNIT_WORDS) {
             textWithDigits = textWithDigits.replace(new RegExp(persian, 'g'), PERSIAN_UNIT_WORDS[persian]);
@@ -1243,11 +1318,12 @@
         if (match) return parseFloat(match[1]);
         match = text.match(/\b(\d+(?:\.\d+)?)\b/);
         if (match) return parseFloat(match[1]);
-        for (const word in PERSIAN_NUMBER_WORDS) {
-            if (text.includes(word)) return parseFloat(PERSIAN_NUMBER_WORDS[word]);
+        for (let i = 0; i < PERSIAN_NUMBER_WORD_KEYS.length; i++) {
+            const word = PERSIAN_NUMBER_WORD_KEYS[i];
+            if (matchPersianNumberWord(text, word)) return parseFloat(PERSIAN_NUMBER_WORDS[word]);
         }
         return null;
     }
 
-    window.VoiceCommands = { process: process };
+    window.VoiceCommands = { process: process, getGrammar: buildVoiceGrammar };
 })(window);
